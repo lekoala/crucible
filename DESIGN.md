@@ -729,10 +729,19 @@ needed no second protocol.
   cache thus accumulates worker durations too, with persistence owned by the supervisor
   alone (workers read the cache for ordering, never write it).
 - **Crash accountability** (the nextest lesson): each unit carries the test ids the
-  supervisor expects back; a worker reaching EOF without its handshake has crashed, and
-  every expected-but-unfinished test is reported errored with the stderr tail as reason.
-  A lost worker can never mean silently lost tests — probed by a fixture whose isolated
-  test calls `exit()`: the crash is contained, the run continues, exit code 2.
+  supervisor expects back, counted per occurrence so `--repeat` repetitions are part of
+  the account; a worker reaching EOF without its handshake has crashed, and every
+  expected-but-unfinished test is reported errored with the stderr tail as reason.
+  A handshake is not enough on its own: a worker that says `run:finish` after dropping a
+  test in rediscovery, losing a terminal event to raw stdout, or emitting an id the
+  parent did not plan is held to the same account. Results for unplanned ids or beyond
+  their occurrence count are drained before they reach the totals or the stream. Missing
+  occurrences are reported errored and keep `complete` absent even though the synthetic
+  errors fill the tally. The one acknowledged shortfall is a stop-on cancellation, and
+  only when the worker's `run:finish` total matches the results that actually arrived and
+  its `run:start` shows it had discovered the whole unit. A lost worker can never mean
+  silently lost tests — probed by a fixture whose isolated test calls `exit()`: the crash
+  is contained, the run continues, exit code 2.
 - **Queue scheduling is LPT** (Graham 1969): units sorted by cached-duration cost,
   costliest first, next unit to the first free slot; stable sort keeps unknown-cost units
   in scheduled order. `--parallel N` routes *all* groups through the pool (one unit per
@@ -1349,13 +1358,18 @@ intersects the change set. Watch mode is slice 2 and builds on this.
 - **Pest-family edge**: `*.pest.php`/`*.crucible.php` files depend on every ancestor
   `Pest.php` and `Datasets/*.php` (D-033 loads them per directory) — a shared-dataset
   edit re-runs the files beneath it.
-- **The change set** (`ChangedFiles::fromGit`): `git diff --name-only --diff-filter=d
+- **The change set** (`ChangedFiles::fromGit`): `git diff --name-status -z --no-renames
   <ref>` (working tree vs ref — committed, staged, and unstaged in one question) plus
-  untracked files from `ls-files --others --exclude-standard` (a brand-new test must be
-  selected, not invisible); deletions tracked separately because they defeat the graph
-  (the dependents of a deleted file can't be found by scanning it). Bare `--changed`
-  means HEAD; `--changed=main` diffs against main. `--related <files>` feeds the same
-  machinery without git — the pre-commit-hook shape (Jest's `--findRelatedTests`).
+  untracked files from `ls-files --others --exclude-standard --full-name -z` (a brand-new
+  test must be selected, not invisible). Every query runs from the repository root, so
+  a run started in a nested directory sees the whole change set; `-z` keeps filenames
+  byte-exact, and `--no-renames` reports both halves of a rename — the deleted old path
+  and the added new one — so a renamed dependency widens instead of selecting nothing.
+  Deletions are tracked separately because they defeat the graph (the dependents of a
+  deleted file can't be found by scanning it). Non-regular tracked entries (gitlinks)
+  count as changed entries. Bare `--changed` means HEAD; `--changed=main` diffs against
+  main. `--related <files>` feeds the same machinery without git — the pre-commit-hook
+  shape (Jest's `--findRelatedTests`).
 - **Widening rules** (when in doubt, run everything, and say why): any deletion; any
   change to composer.json/composer.lock, the loaded configuration file, or the
   bootstrap. Non-PHP changes are **named, not silently dropped** ("N non-PHP change(s)
