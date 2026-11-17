@@ -59,3 +59,4 @@ clover.xml
 
 # A working handoff for the site build, not part of the project.
 /make-site.md
+.temp/
