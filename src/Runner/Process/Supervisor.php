@@ -110,6 +110,7 @@ final class Supervisor
      * @param DependencyValues  $dependencyValues  shared with the in-process runner, so a prerequisite that ran here reaches a dependent that runs in a worker
      * @param list<non-empty-string> $paths        the run's test paths (D-152), carried into every manifest so a worker discovers what the parent did
      * @param bool              $stopOnConfigured  a stop-on option is active, so a worker's early halt is an acknowledged cancellation
+     * @param bool              $noExtensions     CLI --no-extensions, carried into every manifest (D-172) so a worker registers no configured extension either — the around-test role included
      */
     public function __construct(
         private readonly Emitter $emitter,
@@ -137,6 +138,7 @@ final class Supervisor
         private readonly DependencyValues $dependencyValues = new DependencyValues(),
         private readonly array $paths = [],
         private readonly bool $stopOnConfigured = false,
+        private readonly bool $noExtensions = false,
     ) {}
 
     /**
@@ -542,6 +544,7 @@ final class Supervisor
                         $this->pathCoverage,
                         $globalState,
                         $this->paths,
+                        $this->noExtensions,
                     ),
                     $planned->expected,
                     $this->phpArguments(),
