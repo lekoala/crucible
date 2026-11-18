@@ -7324,7 +7324,9 @@ resolve, while `extension=mbstring.so` produces the startup failure the fix exis
 remove; the failure message users are told to run has been corrected with the arguments
 themselves. A driver the child's ini already loads produces the already-loaded notice
 either way; a child that must load its own now can, on every platform.
-=======
+
+---
+
 ### D-179: the PHP extension of the OTR log declares the namespace the schema knows
 
 The OTR subscriber stamped its `php:` extension with `0.1.0` — a version of the
