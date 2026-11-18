@@ -715,12 +715,14 @@ needed no second protocol.
 - **Input protocol = `WorkerManifest`** (JSON on stdin): configuration path, work units
   (file + optional declared names), ordering + seed. Identities only — the worker
   rediscovers and rebuilds tests on its side; **nothing is ever `serialize()`d across the
-  process boundary**. Output protocol = the NDJSON event stream on stdout; there is no
-  third channel (stderr is drained purely for crash diagnostics).
+  process boundary**. Output protocol = the NDJSON event stream on the worker's stderr, every
+  frame prefixed by `WorkerProcess::EVENT_MARKER` (D-169); there is no third channel. stdout
+  carries only user output and the supervisor discards it, while the user's own stderr shares
+  the event pipe in write order — which is what D-124's attribution reads.
 - **`crucible --worker`** prints nothing else: no banner, no reporter. The exit code carries
-  no verdict — the worker's `run:finish` event is the completion handshake. User `echo`s
-  are absorbed by output buffering (the NdjsonWriter writes to the STDOUT *resource*,
-  which bypasses PHP's output buffer), so test output cannot corrupt the protocol.
+  no verdict — the worker's `run:finish` event is the completion handshake. User `echo`s stay
+  on stdout, which the supervisor drains; the marker, not a newline, delimits a frame, so a
+  raw `fwrite()` without one cannot corrupt the protocol.
 - **`Supervisor`** plans in-process vs worker execution, spawns `php crucible --worker` per
   unit (proc_open, non-blocking pipes, stream_select multiplexing), parses worker lines
   back into event objects (`EventParser`, tolerant: unparseable lines are skipped), and
@@ -7012,6 +7014,33 @@ it is not in, ten entries at most and the rest counted. `--coverage-target`, rep
 lines, branches and paths together to the files under a path, on a path boundary, after collection:
 the reports and `--min` judge that scope, an empty one cannot be judged as before, and the caches
 keep what was collected. Per-target floors wait until targets are named things.
+
+### D-169: worker events travel on stderr, behind a marker
+
+The NDJSON protocol shared the worker's stdout with whatever the project printed, and output
+buffering was the only thing keeping a test's `echo` out of the stream. A direct
+`fwrite(STDOUT, 'x')` bypassed the buffer: without a trailing newline it glued itself to the next
+frame, which the supervisor skipped as unparseable — a failing test's result disappeared, and the
+parent reported it as a lost result (the CB-20 reproduction, `F-36`).
+
+Three transports were tried. A third descriptor (`fd 3`) is not portable — Windows cannot pass
+one through `proc_open`. A separate event file plus a marker in the stream lost D-124's
+attribution: reading the file by batches put events ahead of the user text the pipe had not
+delivered yet. So the events share **stderr**, where the user's text already lives, and every
+frame is prefixed with `WorkerProcess::EVENT_MARKER` (`"\0\x1Ecrucible-worker-event\x1E\0"`).
+`nextLine()` splits on the marker, never on a newline the user may not have written, returns
+one frame and leaves everything after it buffered — the text before a frame is exactly the text
+that preceded it in the pipe, so D-124 is preserved without a temporary file. stdout is left to
+the user entirely and drained by `Supervisor::drainStdout()`; `ColdMutantExecutor` reads frames
+the same way. A marker split across two reads keeps its prefix buffered, and a partial frame at
+exit is never reported as a line.
+
+✓ `WorkerAccountingTest`: the raw-stdout case now arrives `fail`, with `Failed asserting that…`
+as its message, and `complete: true` — before, the frame was skipped, the test was reported as a
+lost result (`error`) and the run could not be complete. ✓ New
+`WorkerEventTransportTest`: bootstrap stdout, discovery stdout, isolated-test stderr (exit 2),
+user stderr without a newline before a frame, partial frame at exit. `php crucible --filter Worker`:
+21 passed, 1 skipped (no Laravel), 1 untested (no `posix`).
 
 ---
 
