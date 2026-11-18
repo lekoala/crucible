@@ -502,7 +502,7 @@ The dialect-neutral execution model (D-008 realized):
   Skipped/Incomplete errors→their outcomes, other Throwable→error, zero assertions
   without `#[DoesNotPerformAssertions]`→risky. `#[Requires*]` evaluated pre-run
   (`Test\Requirements`) → skip with reasons. Durations from `hrtime`.
-- **CLI**: `./crucible` loads config, applies bootstrap/ini/env/constants, discovers, runs;
+- **CLI**: `./crucible` loads config, applies ini/env/constants then the bootstrap, discovers, runs;
   `--log-events-json <file>` subscribes the NdjsonWriter alongside the console reporter
   (walking-skeleton `Reporting\ConsoleReporter`). Exit codes: 2 errors, 1 failures or
   failOn-policy hits, 0 otherwise.
@@ -7041,6 +7041,24 @@ lost result (`error`) and the run could not be complete. ✓ New
 `WorkerEventTransportTest`: bootstrap stdout, discovery stdout, isolated-test stderr (exit 2),
 user stderr without a newline before a frame, partial frame at exit. `php crucible --filter Worker`:
 21 passed, 1 skipped (no Laravel), 1 untested (no `posix`).
+
+### D-170: `env()` and `ini()` apply before the bootstrap
+
+A migrated Symfony application boots from `APP_ENV` in `tests/bootstrap.php` (`Dotenv::bootEnv()`),
+and Crucible loaded the bootstrap before applying `->env()`. The bootstrap therefore saw no
+`APP_ENV`, loaded `.env.dev`, and the tests ran against dev mailers and feature flags while the
+configuration said `test` (F-02, ticket #2's item 2). PHPUnit 12.5.40 does the opposite:
+`PhpHandler::handle()` applies include paths, INI settings, constants, global/server variables and
+`<env>` in that order, then `BootstrapLoader` requires the bootstrap.
+
+`ProcessSetup::phpSettings()` now follows that order: include_path, INI, constants, env, then the
+bootstrap. A bootstrap that writes back keeps what it wrote — it runs last, as it does under
+PHPUnit — and D-151's `<env>` semantics are unchanged (an exported value is kept unless forced,
+`$_SERVER` is never written). ✓ Observed, not assumed: `ProcessSetupOrderTest` has the bootstrap
+record `getenv()`, `$_ENV`, `ini_get()` and `defined()`; `EnvBeforeBootstrapTest` runs a project
+whose bootstrap writes what it saw, serial and `--parallel 2`, and every process (parent and
+workers) reports `test`, the configured ini value and the configured constant. Both fail 4/4
+against 1.3.1 and pass 4/4 after.
 
 ---
 
