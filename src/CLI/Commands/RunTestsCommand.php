@@ -84,6 +84,7 @@ use LucianoPereira\Crucible\Runner\Process\DependencyValues;
 use LucianoPereira\Crucible\Runner\Process\EventParser;
 use LucianoPereira\Crucible\Runner\Process\Supervisor;
 use LucianoPereira\Crucible\Runner\Process\WorkerManifest;
+use LucianoPereira\Crucible\Runner\Process\WorkerProcess;
 use LucianoPereira\Crucible\Runner\ProcessSetup;
 use LucianoPereira\Crucible\Runner\PropertyFailures;
 use LucianoPereira\Crucible\Runner\PropertyFailureWriter;
@@ -1665,8 +1666,13 @@ final class RunTestsCommand
         // as NDJSON and the supervisor stamps the report from its own
         // emitter. Verified by running --parallel --reproducible twice
         // and comparing the reports byte for byte.
+        // Events travel on stderr behind a per-frame marker (CB-23), not
+        // on stdout: what the bootstrap, discovery or a test writes to
+        // stdout — even a `fwrite(STDOUT)` with no newline — cannot
+        // corrupt a frame, and user stderr shares the pipe in write
+        // order, which is what the D-124 attribution reads.
         $emitter = new Emitter(new SystemClock());
-        $emitter->subscribe(new NdjsonWriter(STDOUT));
+        $emitter->subscribe(new NdjsonWriter(STDERR, WorkerProcess::EVENT_MARKER));
 
         try {
             $groups = $manifest->filter((new TestDiscoverer())->discover($configuration, $workingDirectory, paths: $manifest->paths));
