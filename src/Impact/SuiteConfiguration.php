@@ -49,7 +49,7 @@ final readonly class SuiteConfiguration
      * @param string $root the project root, native separators
      * @param string $file inside the root, native separators
      *
-     * @return list<string> absolute native paths
+     * @return list<non-empty-string> absolute native paths
      */
     public static function above(string $root, string $file): array
     {
