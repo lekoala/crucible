@@ -7352,31 +7352,6 @@ rather than deferred (the Codeception Cest dialect, RESEARCH.md §5; and the ass
 mapping the retrigger endpoint replaced, D-083) are recorded where they were decided.
 New entries continue as new work lands.
 
-### D-182: a worker's stdout is the null device, and stderr is read only when ready
-
-A worker's stdout was a pipe nobody forwarded: the supervisor drained it only to keep it from filling.
-On Windows that drain deadlocked the run. `stream_set_blocking()` returns **false** for a
-`proc_open()` pipe (measured on PHP 8.3.6), so the pipe stays blocking; a bare `fread()` on the
-stdout of a worker that writes nothing there waited while the worker — a handful of tests in — filled
-its stderr pipe with event frames and waited for a drain that could not happen. A fixture of three
-ordinary files with 30 trivial tests each and `--parallel 2` never finished; it now takes 0.18 s.
-The same class of stall applied to any run whose workers lived long enough, which is why the
-worker-batching trial could not be measured on this machine until this was fixed.
-
-Two changes, each removing one side of the deadlock. The child's stdout is now opened on the
-platform's null device (`NullDevice`, already used wherever a descriptor must be opened and
-discarded): worker stdout was discarded by policy already, so discarding it at the descriptor is the
-same behaviour with no pipe to fill and no readiness to poll.
-And every stderr read is gated on `stream_select` with a zero timeout, EOF included — the same
-readiness primitive the supervisor already multiplexes on — so a read that has nothing to return
-returns 0 and waits for the next wakeup instead of blocking. Closing a worker no longer touches a
-stdout resource because there is none.
-
-The regression test is the fixture that hung, with a hard 15-second deadline: it fails on the
-behaviour, not on a timing delta, and it passes in both the sequential and the `--parallel` runs of
-the suite.
-
-
 ### D-180: a worker reads the run history only for an ordering that asks it
 
 `results.json` is written for the next run, not for the current one: the parent reads it to
@@ -7411,5 +7386,40 @@ index is orphaned and a warm cache stays warm.
 The dedupe lives for the length of one call and no longer, deliberately: a `Pest.php`
 added between two runs still has to move the key, which is what the regression test pins
 on a many-row group.
+
+### D-182: a worker's stdout is the null device, and its stderr is a file on Windows
+
+A worker's stdout was a pipe nobody forwarded: the supervisor drained it only to keep it from
+filling, and on Windows that drain deadlocked the run. `stream_set_blocking()` returns **false** for
+a `proc_open()` pipe (measured on PHP 8.3.6), so the pipe stayed blocking; a bare `fread()` on the
+stdout of a worker that writes nothing there waited while the worker — a handful of tests in —
+filled its stderr pipe and waited for a drain that could not happen. A fixture of three ordinary
+files with 30 trivial tests each and `--parallel 2` never finished; it now takes 0.18 s.
+
+Gating the stderr read on `stream_select()` was not enough. On Windows that call reports a silent
+pipe as readable, so a worker that emits `test:start` and then works for 850 ms still held the
+reader until its next frame: a second worker's result, already written, reached the stream only
+after the silent one woke. That is the shape that also made the mutation executor check its timeout
+late — after the read it wanted to bound. Three things changed:
+
+- the child's stdout is the platform's null device (`NullDevice`, already used wherever a
+  descriptor must be opened and discarded). Worker stdout was discarded by policy already, so
+  discarding it at the descriptor is the same behaviour with no pipe to fill;
+- on Windows the stderr CHANNEL is a regular file, created by `proc_open()` and read incrementally
+  by offset (seeking clears the stream's EOF flag, so a file that grew since the last read is
+  seen). A file read never waits: the child appends, the supervisor reads what has arrived and
+  sleeps 5 ms when nothing has. POSIX keeps the pipe and `stream_select()`, which work there;
+- the supervisor's wait is per platform for the same reason: `stream_select()` on the file would
+  report it readable forever and spin.
+
+`WorkerSilentWorkerTest` is the decisive regression: two files under `--parallel 2`, the first
+emits its start and sleeps 850 ms, the second finishes immediately. The test asserts the SEQUENCE
+of finish events — the fast worker first — and on the select-gated transport it failed with the
+fast result at position 1 and the silent one at 0. `WorkerStdoutDrainTest` now writes the child's
+output to files and polls `proc_get_status()` until its deadline, because its own blocking read
+could not enforce the deadline it was supposed to enforce.
+
+Upstream, this change is only safe on top of CB-23 (D-169): `main` still writes the event stream
+on stdout, precisely the descriptor this change sends to the null device.
 
 
