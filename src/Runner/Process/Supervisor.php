@@ -58,9 +58,11 @@ use function stream_select;
 use function sys_get_temp_dir;
 use function trim;
 use function unlink;
+use function usleep;
 use function usort;
 
 use const PHP_EOL;
+use const PHP_OS_FAMILY;
 use const STDERR;
 
 /**
@@ -84,6 +86,13 @@ use const STDERR;
 final class Supervisor
 {
     private const float SELECT_TIMEOUT_SECONDS = 0.05;
+
+    /**
+     * Between reads on Windows, where stderr is a file rather than a
+     * pipe: short enough to keep a frame's latency invisible, long
+     * enough not to spin a core while every worker is silent.
+     */
+    private const int WINDOWS_POLL_MICROSECONDS = 5_000;
 
     /** @var array<string, int> */
     private array $counts = [
@@ -946,10 +955,22 @@ final class Supervisor
     /**
      * Blocks until any active worker has data (or the timeout passes).
      *
+     * On Windows a worker's stderr is a file (WorkerProcess): there is
+     * no pipe to multiplex, and stream_select() on one would report a
+     * silent child as readable. Reading every file on each pass and
+     * sleeping briefly between passes is what lets a fast worker's
+     * frames reach the stream while another worker is silent.
+     *
      * @param array<int, WorkerProcess> $active
      */
     private function await(array $active): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            usleep(self::WINDOWS_POLL_MICROSECONDS);
+
+            return;
+        }
+
         $read = [];
 
         foreach ($active as $worker) {

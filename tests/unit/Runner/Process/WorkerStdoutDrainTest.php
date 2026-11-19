@@ -14,9 +14,8 @@ use LucianoPereira\Crucible\Framework\TestCase;
 
 use function chmod;
 use function dirname;
-use function fclose;
+use function file_get_contents;
 use function file_put_contents;
-use function fread;
 use function getenv;
 use function is_dir;
 use function is_file;
@@ -30,11 +29,10 @@ use function proc_terminate;
 use function realpath;
 use function rmdir;
 use function scandir;
-use function stream_get_contents;
-use function stream_select;
 use function sys_get_temp_dir;
 use function uniqid;
 use function unlink;
+use function usleep;
 
 use const PHP_BINARY;
 
@@ -108,9 +106,19 @@ final class WorkerStdoutDrainTest extends TestCase
 
     public function testAWorkerSilentOnStdoutStillFinishesTheRun(): void
     {
+        $stdoutFile = $this->project . '/run.stdout';
+        $stderrFile = $this->project . '/run.stderr';
+
+        // The test's own pipes would block on Windows exactly like the
+        // supervisor's did: give the child files, and poll its status
+        // until the deadline. A blocking read here could not enforce
+        // the deadline it is supposed to enforce.
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 4) . '/crucible', '--parallel', '2'],
-            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            [
+                1 => ['file', $stdoutFile, 'w'],
+                2 => ['file', $stderrFile, 'w'],
+            ],
             $pipes,
             $this->project,
             [...getenv(), 'NO_COLOR' => '1', 'TERM' => 'dumb'],
@@ -120,61 +128,23 @@ final class WorkerStdoutDrainTest extends TestCase
             self::fail('crucible could not be started.');
         }
 
-        $stdout   = '';
-        $stderr   = '';
         $deadline = microtime(true) + 15.0;
         $timedOut = false;
 
-        while (true) {
-            $status = proc_get_status($process);
-
-            // The test's own pipes are blocking on Windows too: ask
-            // before reading, exactly as the supervisor now does.
-            $read   = [$pipes[1], $pipes[2]];
-            $write  = null;
-            $except = null;
-
-            if (@stream_select($read, $write, $except, 0, 100_000) > 0) {
-                foreach ($read as $stream) {
-                    $chunk = fread($stream, 65_536);
-
-                    if ($chunk === false) {
-                        continue;
-                    }
-
-                    if ($stream === $pipes[1]) {
-                        $stdout .= $chunk;
-                    } else {
-                        $stderr .= $chunk;
-                    }
-                }
-            }
-
-            if (!$status['running']) {
-                break;
-            }
-
+        while (proc_get_status($process)['running']) {
             if (microtime(true) > $deadline) {
                 $timedOut = true;
+                proc_terminate($process, 9);
 
                 break;
             }
+
+            usleep(10_000);
         }
 
-        if ($timedOut) {
-            // A deadlocked run leaves a worker waiting on its stderr;
-            // stop the parent, then read whatever the pipes still hold
-            // without waiting for a writer that may never finish.
-            proc_terminate($process, 9);
-        } else {
-            $stdout .= (string) stream_get_contents($pipes[1]);
-            $stderr .= (string) stream_get_contents($pipes[2]);
-        }
-
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-
-        $exit = proc_close($process);
+        $exit   = proc_close($process);
+        $stdout = is_file($stdoutFile) ? (string) file_get_contents($stdoutFile) : '';
+        $stderr = is_file($stderrFile) ? (string) file_get_contents($stderrFile) : '';
 
         self::assertFalse($timedOut, 'The run deadlocked: the supervisor waited on a worker that was waiting for its stderr to be drained.');
         self::assertSame(0, $exit, $stdout . $stderr);

@@ -14,8 +14,11 @@ use LucianoPereira\Crucible\Filesystem\WorkingDirectory;
 use LucianoPereira\Crucible\Runner\ProcessSetup;
 use LucianoPereira\Crucible\Test\TestId;
 
+use function bin2hex;
 use function fclose;
+use function fopen;
 use function fread;
+use function fseek;
 use function fwrite;
 use function getenv;
 use function is_int;
@@ -25,16 +28,21 @@ use function proc_close;
 use function proc_get_status;
 use function proc_open;
 use function proc_terminate;
+use function random_bytes;
 use function str_ends_with;
 use function stream_select;
 use function stream_set_blocking;
 use function strlen;
 use function strpos;
 use function substr;
+use function sys_get_temp_dir;
 use function trim;
+use function unlink;
 use function usleep;
 
+use const DIRECTORY_SEPARATOR;
 use const PHP_BINARY;
+use const PHP_OS_FAMILY;
 
 /**
  * One spawned worker: `php crucible --worker`, manifest written to stdin
@@ -57,10 +65,13 @@ use const PHP_BINARY;
  * everything after it in the buffer, so the supervisor attributes the
  * exact text that preceded each event even when it read ahead.
  *
- * stderr reads are gated on stream_select readiness: the Supervisor
- * multiplexes many workers over stream_select, and asking the pipe
- * before reading it is what keeps that contract on Windows, where a
- * proc_open() pipe cannot be made non-blocking.
+ * The stderr transport is the platform's: a pipe read behind
+ * stream_select on POSIX, a regular file on Windows. PHP cannot make a
+ * proc_open() pipe non-blocking there (stream_set_blocking() answers
+ * false on 8.3.6) and stream_select() reports a silent pipe as
+ * readable, so a pipe read waits for the child — while the child may
+ * be waiting for frames to reach the supervisor. A file read never
+ * waits: the child appends, the supervisor reads the new bytes.
  */
 final class WorkerProcess
 {
@@ -96,15 +107,32 @@ final class WorkerProcess
     private ?int $signal = null;
 
     /**
+     * Where the child's stderr goes on Windows, and how far this reader
+     * has consumed it. Named pipes are the cleaner transport, but PHP
+     * cannot make a proc_open() pipe non-blocking there
+     * (stream_set_blocking() answers false on 8.3.6) and stream_select()
+     * reports a silent pipe as readable, so a read still waits for the
+     * child. A regular file is seekable and never blocks: the child
+     * writes, the supervisor reads what has arrived.
+     */
+    private ?string $stderrPath = null;
+
+    private int $stderrOffset = 0;
+
+    /**
      * @param resource     $process
-     * @param resource     $stderr
+     * @param resource     $stderr      the pipe on POSIX, the file handle on Windows
+     * @param ?string      $stderrPath  the file named by the child, Windows only
      * @param list<TestId> $expected the test ids this worker must finish
      */
     private function __construct(
         private $process,
         private $stderr,
+        ?string $stderrPath,
         public readonly array $expected,
-    ) {}
+    ) {
+        $this->stderrPath = $stderrPath;
+    }
 
     /**
      * @param non-empty-string        $crucibleBinary path of the crucible entry script
@@ -124,9 +152,21 @@ final class WorkerProcess
         array $phpArguments = [],
         array $env = [],
     ): ?self {
+        // Windows gets a file for stderr: its pipes cannot be made
+        // non-blocking and a select() on a silent one still reports
+        // readable, so a pipe read would wait for the child. The file
+        // is created here, read incrementally, removed on close.
+        $stderrPath = PHP_OS_FAMILY === 'Windows'
+            ? sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'crucible-worker-' . bin2hex(random_bytes(8)) . '.stderr'
+            : null;
+
         $process = proc_open(
             [PHP_BINARY, ...$phpArguments, $crucibleBinary, '--worker'],
-            [0 => ['pipe', 'r'], 1 => ['file', NullDevice::path(), 'w'], 2 => ['pipe', 'w']],
+            [
+                0 => ['pipe', 'r'],
+                1 => ['file', NullDevice::path(), 'w'],
+                2 => $stderrPath === null ? ['pipe', 'w'] : ['file', $stderrPath, 'w'],
+            ],
             $pipes,
             $workingDirectory->path,
             self::environment($env),
@@ -142,9 +182,23 @@ final class WorkerProcess
         // The child's stdout is the null device (see the class doc):
         // there is no pipe to drain and no way for an echo to stall the
         // run. stderr is the one channel the supervisor reads.
-        stream_set_blocking($pipes[2], false);
+        if ($stderrPath === null) {
+            stream_set_blocking($pipes[2], false);
 
-        return new self($process, $pipes[2], $expected);
+            return new self($process, $pipes[2], null, $expected);
+        }
+
+        $stderr = @fopen($stderrPath, 'rb');
+
+        if (!is_resource($stderr)) {
+            proc_terminate($process, 9);
+            proc_close($process);
+            @unlink($stderrPath);
+
+            return null;
+        }
+
+        return new self($process, $stderr, $stderrPath, $expected);
     }
 
     /**
@@ -329,6 +383,10 @@ final class WorkerProcess
 
         fclose($this->stderr);
 
+        if ($this->stderrPath !== null) {
+            @unlink($this->stderrPath);
+        }
+
         do {
             $status = $this->terminalStatus();
 
@@ -376,12 +434,17 @@ final class WorkerProcess
     /** Reads what the stderr pipe holds now; the byte count, for callers deciding whether to wait. */
     private function readStderr(): int
     {
+        if ($this->stderrPath !== null) {
+            return $this->readStderrFile();
+        }
+
         $read = 0;
 
         // Gated: readStderr() is called on the way out of nextLine()
         // and close(), where the frame the caller wanted may not have
         // arrived yet, and a bare read would wait for output the worker
-        // may only produce once this process drains its pipe.
+        // may only produce once this process drains its pipe. This is
+        // the POSIX path; Windows reads a file instead.
         while ($this->readable($this->stderr)) {
             $chunk = fread($this->stderr, 65_536);
 
@@ -397,16 +460,38 @@ final class WorkerProcess
     }
 
     /**
-     * Whether a pipe holds something to read right now, EOF included.
-     *
-     * PHP cannot make these pipes non-blocking on Windows:
-     * stream_set_blocking() returns false for a proc_open() pipe there
-     * (measured on 8.3.6), and a bare fread() on the stdout of a worker
-     * that writes nothing to it waits forever — while the worker waits
-     * for the stderr the supervisor has not drained. A worker running
-     * a handful of tests emits more than the pipe's buffer, so the two
-     * sides deadlock. stream_select() reports readiness without
-     * reading, on every platform the fork runs on.
+     * What the child has written to the stderr file since the last
+     * read. A regular file never blocks; seeking to the tracked offset
+     * also clears the stream's EOF flag, so a file that grew since the
+     * previous read is seen (a plain fread() after EOF keeps answering
+     * empty).
+     */
+    private function readStderrFile(): int
+    {
+        if (!is_resource($this->stderr)) {
+            return 0;
+        }
+
+        if (@fseek($this->stderr, $this->stderrOffset) !== 0) {
+            return 0;
+        }
+
+        $read = 0;
+
+        while (($chunk = fread($this->stderr, 65_536)) !== false && $chunk !== '') {
+            $this->stderrBuffer .= $chunk;
+            $length = strlen($chunk);
+            $read += $length;
+            $this->stderrOffset += $length;
+        }
+
+        return $read;
+    }
+
+    /**
+     * Whether the stderr PIPE holds something to read right now, EOF
+     * included. POSIX only: on Windows the stderr channel is a file
+     * (see {@see self::$stderrPath}), whose reads never block.
      *
      * @param resource|mixed $stream
      */
