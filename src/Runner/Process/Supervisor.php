@@ -406,11 +406,15 @@ final class Supervisor
         $ids      = [];
         $expected = [];
         $own      = [];
+        $keys     = [];
+        $hasKeys  = false;
 
         foreach ($tests as $test) {
             $expected[] = $test->id;
             $ids[]      = $test->id->toString();
             $own[]      = $test->id->name;
+            $keys[]     = $test->workerKey;
+            $hasKeys    = $hasKeys || $test->workerKey !== '';
             $cost += $this->history->duration($test->id->toString()) ?? 0.0;
         }
 
@@ -438,7 +442,7 @@ final class Supervisor
             }
         }
 
-        return new PlannedUnit([new WorkUnit($file, $ids, $cost)], $expected, $dependsOn, [], $preserve, $isolated);
+        return new PlannedUnit([new WorkUnit($file, $ids, $cost, $hasKeys ? $keys : [])], $expected, $dependsOn, [], $preserve, $isolated);
     }
 
     /**
@@ -690,6 +694,7 @@ final class Supervisor
                         $this->onlySuites,
                         $this->exceptSuites,
                         $this->suffixes,
+                        preserveOrder: true,
                     ),
                     $planned->expected,
                     $this->phpArguments(),

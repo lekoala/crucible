@@ -33,6 +33,7 @@ final readonly class TestDefinition
      *                                            test, when the declaring dialect has
      *                                            one — a phpunit-dialect TestCase; null
      *                                            for pest closures and inline checks
+     * @param string                      $workerKey distinguishes definitions sharing a public ID
      */
     public function __construct(
         public TestId $id,
@@ -40,5 +41,6 @@ final readonly class TestDefinition
         public MetadataCollection $metadata,
         public array $dependencies = [],
         public ?string $class = null,
+        public string $workerKey = '',
     ) {}
 }

@@ -135,6 +135,39 @@ final class ColdMutantExecutorTest extends TestCase
         self::assertSame(MutationOutcome::Escaped, $verdict->outcome);
     }
 
+    public function testAFasterDependentCanKillAMutantAfterItsPrerequisite(): void
+    {
+        $this->write($this->dir . '/tests/CalculatorTest.php', <<<'PHP'
+            <?php
+            namespace ColdFixture;
+            use LucianoPereira\Crucible\Attributes\Depends;
+            use LucianoPereira\Crucible\Framework\TestCase;
+
+            final class CalculatorTest extends TestCase
+            {
+                public function testPrerequisite(): int
+                {
+                    $value = Calculator::add(0, 1);
+                    self::assertSame(1, $value);
+                    return $value;
+                }
+
+                #[Depends('testPrerequisite')]
+                public function testAddsToFour(int $value): void
+                {
+                    self::assertSame(4, Calculator::add($value, 3));
+                }
+            }
+            PHP);
+
+        $verdict = $this->executor()->execute(
+            $this->mutant('return $a === 0 ? $a + $b : $a - $b;'),
+            [self::COVERING_ID, 'tests/CalculatorTest.php::testPrerequisite'],
+        );
+        self::assertSame(MutationOutcome::Killed, $verdict->outcome);
+        self::assertSame(self::COVERING_ID, $verdict->killedBy);
+    }
+
     public function testAMutantOfAFileWithInlineChecksIsKilledColdly(): void
     {
         $this->write($this->dir . '/src/Calculator.php', <<<'PHP'

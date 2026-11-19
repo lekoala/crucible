@@ -337,6 +337,55 @@ final class WorkerBatchingTest extends TestCase
         self::assertSame(3, $this->boots());
     }
 
+    public function testCollidingInlineIdsKeepTheirOwnVerdictsWhenReversedAndRepeated(): void
+    {
+        file_put_contents($this->project . '/crucible.php', <<<'PHP'
+            <?php
+            use LucianoPereira\Crucible\Configuration\Crucible;
+            return Crucible::configure()->source(include: ['tests']);
+            PHP);
+        file_put_contents($this->project . '/tests/Collisions.php', <<<'PHP'
+            <?php
+            namespace First {
+                use LucianoPereira\Crucible\Attributes\Check;
+
+                #[Check(returns: 1)]
+                function sameName(): int { return 1; }
+            }
+            namespace Second {
+                use LucianoPereira\Crucible\Attributes\Check;
+
+                #[Check(returns: 2)]
+                function sameName(): int { return 3; }
+            }
+            PHP);
+        file_put_contents($this->project . '/tests/Independent.php', <<<'PHP'
+            <?php
+            use LucianoPereira\Crucible\Attributes\Check;
+            #[Check(returns: 4)]
+            function independentCheck(): int { return 4; }
+            PHP);
+
+        $order = ['--order-by', 'reverse', '--repeat', '2'];
+
+        foreach ([[], ['--parallel', '2'], ['--parallel', '2', '--worker-batch', '2']] as $plan) {
+            [$exit, $stdout, $events] = $this->crucible([...$order, ...$plan]);
+            $outcomes                 = [];
+
+            foreach ($events as $line) {
+                $event = json_decode($line, true);
+
+                if (is_array($event) && ($event['event'] ?? null) === 'test:finish'
+                    && ($event['id'] ?? null) === 'tests/Collisions.php::sameName#check 1') {
+                    $outcomes[] = $event['outcome'] ?? null;
+                }
+            }
+
+            self::assertSame(1, $exit, $stdout);
+            self::assertSame(['fail', 'fail', 'pass', 'pass'], $outcomes);
+        }
+    }
+
     public function testABatchRunsTestsInTheParentOrder(): void
     {
         // One batch, so the single worker decides the visible sequence.

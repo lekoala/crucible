@@ -173,6 +173,10 @@ final class WorkerProcess
         );
 
         if (!is_resource($process)) {
+            if ($stderrPath !== null) {
+                @unlink($stderrPath);
+            }
+
             return null;
         }
 

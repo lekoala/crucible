@@ -16,8 +16,10 @@ use LucianoPereira\Crucible\Test\TestDefinition;
 use LucianoPereira\Crucible\Test\TestGroup;
 
 use function array_filter;
+use function array_is_list;
 use function array_map;
 use function array_values;
+use function count;
 use function is_array;
 use function is_bool;
 use function is_int;
@@ -33,7 +35,7 @@ use const JSON_UNESCAPED_SLASHES;
  * load, the work to run, and the ordering to apply — everything a
  * worker needs to reproduce its slice of the run deterministically,
  * as plain JSON. The manifest is the entire input protocol; the
- * NDJSON event stream on stdout is the entire output protocol.
+ * framed NDJSON event stream on stderr is the output protocol.
  */
 final readonly class WorkerManifest
 {
@@ -61,6 +63,7 @@ final readonly class WorkerManifest
      * @param ?list<non-empty-string> $onlySuites
      * @param list<non-empty-string>  $exceptSuites
      * @param list<non-empty-string>  $suffixes
+     * @param bool                   $preserveOrder the supervisor has already scheduled the test IDs
      */
     public function __construct(
         public string $configuration,
@@ -89,6 +92,7 @@ final readonly class WorkerManifest
         public ?array $onlySuites = null,
         public array $exceptSuites = [],
         public array $suffixes = [],
+        public bool $preserveOrder = false,
     ) {}
 
     public function toJson(): string
@@ -96,7 +100,11 @@ final readonly class WorkerManifest
         return json_encode([
             'configuration' => $this->configuration,
             'units'         => array_map(
-                static fn(WorkUnit $unit): array => ['file' => $unit->file, 'tests' => $unit->tests],
+                static fn(WorkUnit $unit): array => [
+                    'file'  => $unit->file,
+                    'tests' => $unit->tests,
+                    ...($unit->workerKeys === [] ? [] : ['workerKeys' => $unit->workerKeys]),
+                ],
                 $this->units,
             ),
             'order'              => $this->order->value,
@@ -123,6 +131,7 @@ final readonly class WorkerManifest
             'onlySuites'         => $this->onlySuites,
             'exceptSuites'       => $this->exceptSuites,
             'suffixes'           => $this->suffixes,
+            'preserveOrder'      => $this->preserveOrder,
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
     }
 
@@ -170,7 +179,7 @@ final readonly class WorkerManifest
                 continue;
             }
 
-            /** @var array<int, array{non-empty-string, TestDefinition}> $byId */
+            /** @var array<non-empty-string, array<int|string, array{int, TestDefinition}>> $byId */
             $byId = [];
 
             /** @var array<non-empty-string, list<array{int, TestDefinition}>> $byName */
@@ -178,10 +187,7 @@ final readonly class WorkerManifest
 
             foreach ($source as $index => $group) {
                 foreach ($group->tests as $definition) {
-                    // First match wins for an exact id; a name can be
-                    // carried by several dataset rows, which is the
-                    // documented behaviour of a name-only entry.
-                    $byId[$definition->id->toString()] ??= [$index, $definition];
+                    $byId[$definition->id->toString()][$definition->workerKey] ??= [$index, $definition];
                     $byName[$definition->id->name][] = [$index, $definition];
                 }
             }
@@ -189,10 +195,13 @@ final readonly class WorkerManifest
             /** @var array<int, list<TestDefinition>> $wanted */
             $wanted = [];
 
-            foreach ($unit->tests as $entry) {
-                $matches = isset($byId[$entry])
-                    ? [$byId[$entry]]
-                    : $byName[$entry] ?? [];
+            foreach ($unit->tests as $position => $entry) {
+                if ($this->preserveOrder) {
+                    $match   = $byId[$entry][$unit->workerKeys[$position] ?? ''] ?? null;
+                    $matches = $match === null ? [] : [$match];
+                } else {
+                    $matches = $byId[$entry] ?? $byName[$entry] ?? [];
+                }
 
                 foreach ($matches as [$index, $definition]) {
                     $wanted[$index][] = $definition;
@@ -212,13 +221,15 @@ final readonly class WorkerManifest
     }
 
     /**
-     * Whether a unit names only a file, leaving discovery and ordering
-     * to the worker (a hand-built manifest, or cold mutation naming a
-     * whole file). Supervisor-planned units always carry their ids, so
-     * a parallel run never takes this path.
+     * Cold mutation and hand-built manifests leave scheduling to the
+     * worker. Only a preordered plan of exact tests can skip it.
      */
     public function needsScheduling(): bool
     {
+        if (!$this->preserveOrder) {
+            return true;
+        }
+
         foreach ($this->units as $unit) {
             if ($unit->tests === null) {
                 return true;
@@ -265,7 +276,27 @@ final readonly class WorkerManifest
                 }
             }
 
-            $units[] = new WorkUnit($unit['file'], $tests);
+            $workerKeys = [];
+
+            if (isset($unit['workerKeys'])) {
+                if (!is_array($unit['workerKeys']) || !array_is_list($unit['workerKeys'])) {
+                    return null;
+                }
+
+                foreach ($unit['workerKeys'] as $key) {
+                    if (!is_string($key)) {
+                        return null;
+                    }
+
+                    $workerKeys[] = $key;
+                }
+
+                if ($tests === null || count($workerKeys) !== count($tests)) {
+                    return null;
+                }
+            }
+
+            $units[] = new WorkUnit($unit['file'], $tests, workerKeys: $workerKeys);
         }
 
         $testToken       = $decoded['testToken'] ?? null;
@@ -327,6 +358,7 @@ final readonly class WorkerManifest
             is_array($decoded['onlySuites'] ?? null) ? self::strings($decoded['onlySuites']) : null,
             self::strings($decoded['exceptSuites'] ?? null),
             self::strings($decoded['suffixes'] ?? null),
+            ($decoded['preserveOrder'] ?? false) === true,
         );
     }
 

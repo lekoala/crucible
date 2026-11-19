@@ -1830,12 +1830,12 @@ final class RunTestsCommand
             return 2;
         }
 
-        // A named unit carries the parent's decision: the file order,
+        // A supervisor plan carries the parent's decision: the file order,
         // the test order, the repetitions and the selection are all in
         // the manifest, so re-applying an ordering here would apply it
         // twice (reverse was reversed back) and reshuffle what the
-        // parent settled. Only a whole-file unit leaves scheduling to
-        // the worker, and only that path can read the history.
+        // parent settled. Cold mutation supplies a ranking of covering
+        // tests that still needs dependency repair.
         if ($manifest->needsScheduling()) {
             $cacheFile = $workingDirectory->absolute($configuration->cacheDirectory) . '/results.json';
             $cache     = $configuration->cacheResult && $manifest->order->needsHistory()

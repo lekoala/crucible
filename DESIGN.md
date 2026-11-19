@@ -7408,7 +7408,8 @@ late — after the read it wanted to bound. Three things changed:
 - on Windows the stderr CHANNEL is a regular file, created by `proc_open()` and read incrementally
   by offset (seeking clears the stream's EOF flag, so a file that grew since the last read is
   seen). A file read never waits: the child appends, the supervisor reads what has arrived and
-  sleeps 5 ms when nothing has. POSIX keeps the pipe and `stream_select()`, which work there;
+  sleeps 5 ms when nothing has. If process creation fails, the parent also removes the file.
+  POSIX keeps the pipe and `stream_select()`, which work there;
 - the supervisor's wait is per platform for the same reason: `stream_select()` on the file would
   report it readable forever and spin.
 
@@ -7438,10 +7439,12 @@ repetitions and the selection, and a second pass applied `reverse` twice and res
 against a smaller group set: four files in one batch under `--order-by reverse` ran A, B, C, D where
 the sequential twin ran D, C, B, A. `WorkerManifest::filter()` now REBUILDS the groups from the
 units: files in unit order (a file may appear twice, for two suites), tests in the unit's exact id
-sequence (duplicates included, which is how a repetition and a dataset row survive). The manifest's
-test list is the plan. The scheduler stays only for a whole-file unit (`tests === null`, a
-hand-built manifest), which is also the only path that can still read the run history — so D-180's
-gate survives there, while supervisor-planned units read no history at all.
+sequence, including repetitions and dataset rows. Discovery assigns a worker key when definitions
+share a public id, and for inline definitions in files that can also belong to a suite. The
+supervisor sends those keys with the ids, so two inline functions with the same short name each
+keep their own verdict, even under reversal and repetition. Hand-built manifests still use the
+worker scheduler, and cold mutation uses it to put a covering test's prerequisites before it.
+D-180's history gate applies when the worker schedules.
 
 Two units of the SAME FILE never share a batch: the worker discovers each named file once, so a
 second occurrence (two named suites listing it, a file that also carries inline tests) would be

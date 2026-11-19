@@ -20,6 +20,8 @@ use LucianoPereira\Crucible\Dialect\PhpUnit\ClassLocator;
 use LucianoPereira\Crucible\Dialect\PhpUnit\TestBuilder;
 use LucianoPereira\Crucible\Filesystem\WorkingDirectory;
 use LucianoPereira\Crucible\Framework\TestCase;
+use LucianoPereira\Crucible\Test\TestDefinition;
+use LucianoPereira\Crucible\Test\TestGroup;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use ReflectionClass;
@@ -103,7 +105,7 @@ final readonly class TestDiscoverer
                 $group = $this->groupFrom($file, $workingDirectory);
 
                 if ($group instanceof \LucianoPereira\Crucible\Test\TestGroup && $group->tests !== []) {
-                    $groups[] = $group;
+                    $groups[] = $this->withWorkerKeys($group);
                 }
             }
         }
@@ -119,7 +121,7 @@ final readonly class TestDiscoverer
                 $group = $this->inlineBuilder->build($file, $this->relative($file, $workingDirectory));
 
                 if ($group instanceof \LucianoPereira\Crucible\Test\TestGroup && $group->tests !== []) {
-                    $groups[] = $group;
+                    $groups[] = $this->withWorkerKeys($group, 'inline:');
                 }
             }
         }
@@ -171,7 +173,7 @@ final readonly class TestDiscoverer
             $group = $this->groupFrom($file, $workingDirectory);
 
             if ($group instanceof \LucianoPereira\Crucible\Test\TestGroup && $group->tests !== []) {
-                $groups[] = $group;
+                $groups[] = $this->withWorkerKeys($group);
             }
 
             // A source file with inline markers is the inline scan's
@@ -183,12 +185,44 @@ final readonly class TestDiscoverer
                 $inline = $this->inlineBuilder->build($file, $this->relative($file, $workingDirectory));
 
                 if ($inline instanceof \LucianoPereira\Crucible\Test\TestGroup && $inline->tests !== []) {
-                    $groups[] = $inline;
+                    $groups[] = $this->withWorkerKeys($inline, 'inline:');
                 }
             }
         }
 
         return $groups;
+    }
+
+    /**
+     * Number definitions sharing an ID in discovery order, before either
+     * selection or scheduling. Repeats reuse the same definition and key.
+     * Inline tests have their own keys when the same file also belongs to a suite.
+     */
+    private function withWorkerKeys(TestGroup $group, string $prefix = ''): TestGroup
+    {
+        $seen  = [];
+        $tests = $group->tests;
+
+        foreach ($tests as $index => $test) {
+            $id         = $test->id->toString();
+            $occurrence = $seen[$id] ?? 0;
+            $seen[$id]  = $occurrence + 1;
+
+            if ($prefix === '' && $occurrence === 0) {
+                continue;
+            }
+
+            $tests[$index] = new TestDefinition(
+                $test->id,
+                $test->test,
+                $test->metadata,
+                $test->dependencies,
+                $test->class,
+                $prefix . $occurrence,
+            );
+        }
+
+        return $tests === $group->tests ? $group : new TestGroup($group->name, $tests, $group->beforeAll, $group->afterAll);
     }
 
     /**
