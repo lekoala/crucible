@@ -13,12 +13,14 @@ namespace LucianoPereira\Crucible\Tests\Runner\Process;
 use LucianoPereira\Crucible\Framework\TestCase;
 
 use function chmod;
+use function count;
 use function dirname;
 use function explode;
 use function fclose;
 use function file_get_contents;
 use function file_put_contents;
 use function getenv;
+use function glob;
 use function is_array;
 use function is_dir;
 use function is_file;
@@ -33,7 +35,6 @@ use function rmdir;
 use function scandir;
 use function sort;
 use function stream_get_contents;
-use function substr_count;
 use function sys_get_temp_dir;
 use function uniqid;
 use function unlink;
@@ -95,13 +96,13 @@ final class WorkerUnitDiscoveryTest extends TestCase
             use LucianoPereira\Crucible\Attributes\DataProvider;
             use LucianoPereira\Crucible\Framework\TestCase;
 
-            file_put_contents(__DIR__ . '/../counters.log', "load alpha\n", FILE_APPEND);
+            file_put_contents(__DIR__ . '/../load-alpha-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
             final class AlphaTest extends TestCase
             {
                 public static function rows(): array
                 {
-                    file_put_contents(__DIR__ . '/../counters.log', "provider alpha\n", FILE_APPEND);
+                    file_put_contents(__DIR__ . '/../provider-alpha-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
                     return [
                         'row one' => ['one'],
@@ -124,7 +125,7 @@ final class WorkerUnitDiscoveryTest extends TestCase
 
             declare(strict_types=1);
 
-            file_put_contents(__DIR__ . '/../counters.log', "load beta\n", FILE_APPEND);
+            file_put_contents(__DIR__ . '/../load-beta-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
             \test('beta knows its name', function (): void {
                 \expect('beta')->toBe('beta');
@@ -137,7 +138,7 @@ final class WorkerUnitDiscoveryTest extends TestCase
 
             declare(strict_types=1);
 
-            file_put_contents(__DIR__ . '/../counters.log', "load gamma\n", FILE_APPEND);
+            file_put_contents(__DIR__ . '/../load-gamma-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
             \check(fn(): string => 'gamma')->toBe('gamma');
             PHP);
@@ -150,7 +151,7 @@ final class WorkerUnitDiscoveryTest extends TestCase
 
             declare(strict_types=1);
 
-            file_put_contents(__DIR__ . '/../counters.log', "load calculator\n", FILE_APPEND);
+            file_put_contents(__DIR__ . '/../load-calculator-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
             final class Calculator
             {
@@ -179,7 +180,15 @@ final class WorkerUnitDiscoveryTest extends TestCase
     {
         $events = $this->project . '/events.ndjson';
         @unlink($events);
-        @unlink($this->project . '/counters.log');
+
+        // One marker file per load, never a shared append: concurrent
+        // workers appending to one file lose lines on Windows, and the
+        // count is the measurement.
+        $markers = glob($this->project . '/*-*');
+
+        foreach ($markers === false ? [] : $markers as $marker) {
+            @unlink($marker);
+        }
 
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 4) . '/crucible', ...$arguments, '--log-events-json', $events],
@@ -244,16 +253,19 @@ final class WorkerUnitDiscoveryTest extends TestCase
      */
     private function counters(): array
     {
-        $log    = (string) file_get_contents($this->project . '/counters.log');
-        $counts = [
-            'alpha'      => substr_count($log, 'load alpha'),
-            'beta'       => substr_count($log, 'load beta'),
-            'gamma'      => substr_count($log, 'load gamma'),
-            'calculator' => substr_count($log, 'load calculator'),
-            'provider'   => substr_count($log, 'provider alpha'),
-        ];
+        $count = static function (string $prefix): int {
+            $files = glob($prefix . '-*');
 
-        return [$counts['alpha'], $counts['beta'], $counts['gamma'], $counts['calculator'], $counts['provider']];
+            return $files === false ? 0 : count($files);
+        };
+
+        return [
+            $count($this->project . '/load-alpha'),
+            $count($this->project . '/load-beta'),
+            $count($this->project . '/load-gamma'),
+            $count($this->project . '/load-calculator'),
+            $count($this->project . '/provider-alpha'),
+        ];
     }
 
     public function testAParallelWorkerDiscoversOnlyTheFilesItsUnitsName(): void

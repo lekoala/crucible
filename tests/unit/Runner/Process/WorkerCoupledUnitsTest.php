@@ -13,12 +13,14 @@ namespace LucianoPereira\Crucible\Tests\Runner\Process;
 use LucianoPereira\Crucible\Framework\TestCase;
 
 use function chmod;
+use function count;
 use function dirname;
 use function explode;
 use function fclose;
 use function file_get_contents;
 use function file_put_contents;
 use function getenv;
+use function glob;
 use function is_array;
 use function is_dir;
 use function is_file;
@@ -34,7 +36,6 @@ use function scandir;
 use function sort;
 use function str_replace;
 use function stream_get_contents;
-use function substr_count;
 use function sys_get_temp_dir;
 use function uniqid;
 use function unlink;
@@ -80,7 +81,7 @@ final class WorkerCoupledUnitsTest extends TestCase
 
             use LucianoPereira\Crucible\Framework\TestCase;
 
-            file_put_contents(__DIR__ . '/../counters.log', "load alpha\n", FILE_APPEND);
+            file_put_contents(__DIR__ . '/../load-alpha-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
             function alpha_greeting(): string
             {
@@ -106,7 +107,7 @@ final class WorkerCoupledUnitsTest extends TestCase
 
             use LucianoPereira\Crucible\Framework\TestCase;
 
-            file_put_contents(__DIR__ . '/../counters.log', "load beta\n", FILE_APPEND);
+            file_put_contents(__DIR__ . '/../load-beta-' . getmypid() . '-' . bin2hex(random_bytes(4)), '');
 
             final class BetaTest extends TestCase
             {
@@ -248,7 +249,12 @@ final class WorkerCoupledUnitsTest extends TestCase
     {
         $events = $this->project . '/events.ndjson';
         @unlink($events);
-        @unlink($this->project . '/counters.log');
+
+        $markers = glob($this->project . '/*-*');
+
+        foreach ($markers === false ? [] : $markers as $marker) {
+            @unlink($marker);
+        }
 
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 4) . '/crucible', ...$arguments, '--log-events-json', $events],
@@ -313,11 +319,15 @@ final class WorkerCoupledUnitsTest extends TestCase
      */
     private function counters(): array
     {
-        $log = (string) file_get_contents($this->project . '/counters.log');
+        $count = static function (string $prefix): int {
+            $files = glob($prefix . '-*');
+
+            return $files === false ? 0 : count($files);
+        };
 
         return [
-            substr_count($log, 'load alpha'),
-            substr_count($log, 'load beta'),
+            $count($this->project . '/load-alpha'),
+            $count($this->project . '/load-beta'),
         ];
     }
 

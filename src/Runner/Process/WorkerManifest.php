@@ -18,7 +18,6 @@ use LucianoPereira\Crucible\Test\TestGroup;
 use function array_filter;
 use function array_map;
 use function array_values;
-use function in_array;
 use function is_array;
 use function is_bool;
 use function is_int;
@@ -128,11 +127,16 @@ final readonly class WorkerManifest
     }
 
     /**
-     * Narrows discovered groups to this manifest's work: groups whose
-     * file no unit names are dropped; a unit with a test list keeps
-     * the entries it names — a declared name keeps every dataset row
-     * of it, a full id string (file::name#dataset) keeps exactly that
-     * row, so supervisor-side selection survives the process boundary.
+     * Narrows discovered groups to this manifest's work, in the
+     * manifest's OWN order: the units decide which file comes first (a
+     * file may appear twice, for two suites or two repetitions), and a
+     * unit's test list is the exact sequence its worker runs — full id
+     * strings keep their dataset row and their duplicates.
+     *
+     * Rebuilding rather than filtering is what makes a batch the
+     * parent's plan rather than the discovery order: the parent has
+     * already applied the ordering, the repetitions and the selection,
+     * and none of that survives a discovery-order walk.
      *
      * @param list<TestGroup> $groups
      *
@@ -140,56 +144,88 @@ final readonly class WorkerManifest
      */
     public function filter(array $groups): array
     {
-        $filtered = [];
+        /** @var array<non-empty-string, list<TestGroup>> $byFile */
+        $byFile = [];
 
         foreach ($groups as $group) {
-            if ($group->tests === []) {
+            if ($group->tests !== []) {
+                $byFile[$group->tests[0]->id->file][] = $group;
+            }
+        }
+
+        $filtered = [];
+
+        foreach ($this->units as $unit) {
+            $source = $byFile[$unit->file] ?? [];
+
+            if ($source === []) {
                 continue;
             }
 
-            $file      = $group->tests[0]->id->file;
-            $names     = [];
-            $wholeFile = false;
-            $matched   = false;
+            if ($unit->tests === null) {
+                foreach ($source as $group) {
+                    $filtered[] = $group;
+                }
 
-            foreach ($this->units as $unit) {
-                if ($unit->file !== $file) {
+                continue;
+            }
+
+            /** @var array<int, array{non-empty-string, TestDefinition}> $byId */
+            $byId = [];
+
+            /** @var array<non-empty-string, list<array{int, TestDefinition}>> $byName */
+            $byName = [];
+
+            foreach ($source as $index => $group) {
+                foreach ($group->tests as $definition) {
+                    // First match wins for an exact id; a name can be
+                    // carried by several dataset rows, which is the
+                    // documented behaviour of a name-only entry.
+                    $byId[$definition->id->toString()] ??= [$index, $definition];
+                    $byName[$definition->id->name][] = [$index, $definition];
+                }
+            }
+
+            /** @var array<int, list<TestDefinition>> $wanted */
+            $wanted = [];
+
+            foreach ($unit->tests as $entry) {
+                $matches = isset($byId[$entry])
+                    ? [$byId[$entry]]
+                    : $byName[$entry] ?? [];
+
+                foreach ($matches as [$index, $definition]) {
+                    $wanted[$index][] = $definition;
+                }
+            }
+
+            foreach ($source as $index => $group) {
+                if (!isset($wanted[$index])) {
                     continue;
                 }
 
-                $matched = true;
-
-                if ($unit->tests === null) {
-                    $wholeFile = true;
-
-                    break;
-                }
-
-                $names = [...$names, ...$unit->tests];
-            }
-
-            if (!$matched) {
-                continue;
-            }
-
-            if ($wholeFile) {
-                $filtered[] = $group;
-
-                continue;
-            }
-
-            $tests = array_values(array_filter(
-                $group->tests,
-                static fn(TestDefinition $test): bool => in_array($test->id->name, $names, true)
-                    || in_array($test->id->toString(), $names, true),
-            ));
-
-            if ($tests !== []) {
-                $filtered[] = new TestGroup($group->name, $tests, $group->beforeAll, $group->afterAll);
+                $filtered[] = new TestGroup($group->name, $wanted[$index], $group->beforeAll, $group->afterAll);
             }
         }
 
         return $filtered;
+    }
+
+    /**
+     * Whether a unit names only a file, leaving discovery and ordering
+     * to the worker (a hand-built manifest, or cold mutation naming a
+     * whole file). Supervisor-planned units always carry their ids, so
+     * a parallel run never takes this path.
+     */
+    public function needsScheduling(): bool
+    {
+        foreach ($this->units as $unit) {
+            if ($unit->tests === null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static function fromJson(string $json): ?self

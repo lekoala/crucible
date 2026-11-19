@@ -7423,3 +7423,86 @@ Upstream, this change is only safe on top of CB-23 (D-169): `main` still writes 
 on stdout, precisely the descriptor this change sends to the null device.
 
 
+
+### D-183: `--worker-batch` lets one process carry several independent units
+
+Opt-in, default 1: `--worker-batch N` makes one worker process carry up to N units. A unit is the
+file-and-tests share the supervisor already plans, so a batch is several `WorkUnit`s in one
+manifest, which the worker already understood (`discoverUnits()` walks the named files, `run:start`
+announces the sum, one `run:finish` closes it). What changed is the supervisor: `PlannedUnit` holds a
+list of units, the batch inherits their summed cached cost for LPT, and a batch is built from
+CONSECUTIVE units in the scheduled order so the files load in the order the sequential run would.
+
+The worker no longer re-schedules a named unit. The parent has already applied the ordering, the
+repetitions and the selection, and a second pass applied `reverse` twice and reshuffled `random`
+against a smaller group set: four files in one batch under `--order-by reverse` ran A, B, C, D where
+the sequential twin ran D, C, B, A. `WorkerManifest::filter()` now REBUILDS the groups from the
+units: files in unit order (a file may appear twice, for two suites), tests in the unit's exact id
+sequence (duplicates included, which is how a repetition and a dataset row survive). The manifest's
+test list is the plan. The scheduler stays only for a whole-file unit (`tests === null`, a
+hand-built manifest), which is also the only path that can still read the run history — so D-180's
+gate survives there, while supervisor-planned units read no history at all.
+
+Two units of the SAME FILE never share a batch: the worker discovers each named file once, so a
+second occurrence (two named suites listing it, a file that also carries inline tests) would be
+counted twice by the parent and run once by the worker — one result, one error, exit 2. Keeping the
+occurrence in its own process preserves the existing behaviour exactly: two units, two discoveries,
+two verdicts. Repetitions are unaffected, because the parent keeps them inside one unit.
+
+Measured on this machine (Windows, PHP 8.3.6, 300 trivial files, one test each, `--parallel 8`,
+median of three runs, one marker file per bootstrap so concurrent appends cannot lose a line):
+
+| Plan | Wall | Bootstraps (parent + workers) |
+|---|---:|---:|
+| sequential | 0.26 s | 1 |
+| `--parallel 8` | 4.40 s | 301 |
+| `--parallel 8 --worker-batch 4` | 1.33 s | 76 |
+| `--parallel 8 --worker-batch 8` | 0.80 s | 39 |
+
+The 300 ids and verdicts are identical in every plan. The 5.5× against one-unit-per-process
+reproduces the prototype from the perf note (5.8–6.4×); the residual is process startup and the
+parent's 300-file discovery, and it is the terrain of the worker pool (N-05) if it is still worth
+it after the Symfony measurement. That measurement is the next decision: these numbers come from
+trivial tests, where a worker's cost is almost entirely startup. If a Symfony run spends its time
+in the kernel or the database per test, batching divides the startup, not that work.
+
+The fork's own suite has the same direction (1,985 tests, one run each on this machine): sequential
+118.9 s, `--parallel 8` 36.0–36.6 s, `--worker-batch 4` 27.5–28.6 s, `--worker-batch 8` 29.8 s, ids
+and verdicts identical. The earlier 66.4 s against 52.1 s was D-182's blocking read, not the file
+distribution: with the transport fixed, four units per process buys about a quarter over one, and
+eight already pays a heavier tail. The Symfony profile — kernel and database per test — still
+decides whether that holds there.
+
+Exclusions keep the process boundary where it means something: a unit that asked for its own
+process (`#[RunInSeparateProcess]`, `#[RunTestsInSeparateProcesses]`, `--process-isolation`), a
+unit that provides or consumes a `#[Depends]` value (the value is captured at dispatch, so provider
+and consumer need the boundary), a unit that asked for the parent's global state (one snapshot would
+be handed to every member), and every unit when a `stop-on` option is active (a halted worker must
+not take the rest of its batch with it). Units that are batched are ordinary `--parallel` shares,
+whose only contract is LPT order and exact ids.
+
+A crash inside a batch is still reported per unit: the supervisor names every expected-but-unfinished
+test errored with the worker's stderr tail, as CB-20 established. It does not re-dispatch the
+survivors — a test that produced side effects before the crash would run twice, and a missing result
+is the honest report.
+
+The trial is not measurable without D-182: the drain deadlock made every suite with more than a
+handful of tests per worker hang on Windows. This is fork-only for now; whether it becomes an
+upstream proposal depends on the Symfony numbers.
+
+Exclusions keep the process boundary where it means something: a unit that asked for its own
+process (`#[RunInSeparateProcess]`, `#[RunTestsInSeparateProcesses]`, `--process-isolation`), a
+unit that provides or consumes a `#[Depends]` value (the value is captured at dispatch, so provider
+and consumer need the boundary), a unit that asked for the parent's global state (one snapshot would
+be handed to every member), and every unit when a `stop-on` option is active (a halted worker must
+not take the rest of its batch with it). Units that are batched are ordinary `--parallel` shares,
+whose only contract is LPT order and exact ids.
+
+A crash inside a batch is still reported per unit: the supervisor names every expected-but-unfinished
+test errored with the worker's stderr tail, as CB-20 established. It does not re-dispatch the
+survivors — a test that produced side effects before the crash would run twice, and a missing result
+is the honest report.
+
+The trial is not measurable without D-182: the drain deadlock made every suite with more than a
+handful of tests per worker hang on Windows. This is fork-only for now; whether it becomes an
+upstream proposal depends on the Symfony numbers.

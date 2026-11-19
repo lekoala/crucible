@@ -458,6 +458,14 @@ final class Supervisor
      * one unit per process: a halted worker must not take the rest of
      * its batch with it.
      *
+     * Two units of the SAME FILE never share a batch. The worker
+     * discovers each named file once, so a second occurrence of one
+     * file — two named suites listing it, a file that also carries
+     * inline tests — would be counted twice by the parent and run once
+     * by the worker, which is one result and one error. Keeping the
+     * occurrence in its own process preserves the current behaviour
+     * exactly: two units, two discoveries, two verdicts.
+     *
      * @param list<PlannedUnit> $units
      *
      * @return list<PlannedUnit>
@@ -471,11 +479,17 @@ final class Supervisor
         $batches = [];
         $current = [];
 
+        /** @var array<non-empty-string, true> $files the current batch's files */
+        $files = [];
+
         foreach ($units as $unit) {
+            $file = $unit->units[0]->file ?? '';
+
             if (!$this->batchable($unit)) {
                 if ($current !== []) {
                     $batches[] = $this->batch($current);
                     $current   = [];
+                    $files     = [];
                 }
 
                 $batches[] = $unit;
@@ -483,11 +497,22 @@ final class Supervisor
                 continue;
             }
 
+            if ($current !== [] && isset($files[$file])) {
+                $batches[] = $this->batch($current);
+                $current   = [];
+                $files     = [];
+            }
+
             $current[] = $unit;
+
+            if ($file !== '') {
+                $files[$file] = true;
+            }
 
             if (count($current) === $this->workerBatch) {
                 $batches[] = $this->batch($current);
                 $current   = [];
+                $files     = [];
             }
         }
 

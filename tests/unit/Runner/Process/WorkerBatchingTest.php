@@ -12,31 +12,35 @@ namespace LucianoPereira\Crucible\Tests\Runner\Process;
 
 use LucianoPereira\Crucible\Framework\TestCase;
 
+use function array_count_values;
 use function chmod;
+use function count;
 use function dirname;
 use function explode;
-use function fclose;
 use function file_get_contents;
 use function file_put_contents;
 use function getenv;
+use function glob;
 use function is_array;
 use function is_dir;
 use function is_file;
 use function is_resource;
 use function is_string;
 use function json_decode;
+use function microtime;
 use function mkdir;
 use function proc_close;
+use function proc_get_status;
 use function proc_open;
+use function proc_terminate;
 use function realpath;
 use function rmdir;
 use function scandir;
 use function sort;
-use function stream_get_contents;
-use function substr_count;
 use function sys_get_temp_dir;
 use function uniqid;
 use function unlink;
+use function usleep;
 
 use const PHP_BINARY;
 
@@ -70,7 +74,13 @@ final class WorkerBatchingTest extends TestCase
         file_put_contents($this->project . '/bootstrap.php', <<<'PHP'
             <?php
 
-            file_put_contents(__DIR__ . '/counters.log', "boot\n", FILE_APPEND);
+            // One file per bootstrap, never an append: concurrent
+            // workers appending to one file lose lines on Windows, and
+            // the count is the measurement.
+            file_put_contents(
+                __DIR__ . '/boot-' . getmypid() . '-' . bin2hex(random_bytes(4)),
+                '',
+            );
             PHP);
 
         file_put_contents($this->project . '/crucible.php', <<<'PHP'
@@ -129,13 +139,24 @@ final class WorkerBatchingTest extends TestCase
      */
     private function crucible(array $arguments): array
     {
-        $events = $this->project . '/events.ndjson';
-        @unlink($events);
-        @unlink($this->project . '/counters.log');
+        $events     = $this->project . '/events.ndjson';
+        $stdoutFile = $this->project . '/run.stdout';
+        $stderrFile = $this->project . '/run.stderr';
 
+        @unlink($events);
+
+        foreach ($this->bootFiles() as $boot) {
+            @unlink($boot);
+        }
+
+        // Files, not pipes: a regression that deadlocks the supervisor
+        // must fail the deadline below, not block the test reading it.
         $process = proc_open(
             [PHP_BINARY, dirname(__DIR__, 4) . '/crucible', ...$arguments, '--log-events-json', $events],
-            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            [
+                1 => ['file', $stdoutFile, 'w'],
+                2 => ['file', $stderrFile, 'w'],
+            ],
             $pipes,
             $this->project,
             [...getenv(), 'NO_COLOR' => '1', 'TERM' => 'dumb'],
@@ -145,13 +166,28 @@ final class WorkerBatchingTest extends TestCase
             self::fail('crucible could not be started.');
         }
 
-        $stdout = (string) stream_get_contents($pipes[1]);
-        $stderr = (string) stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
+        $deadline = microtime(true) + 20.0;
+        $timedOut = false;
+
+        while (proc_get_status($process)['running']) {
+            if (microtime(true) > $deadline) {
+                $timedOut = true;
+                proc_terminate($process, 9);
+
+                break;
+            }
+
+            usleep(10_000);
+        }
 
         $exit     = proc_close($process);
+        $stdout   = is_file($stdoutFile) ? (string) file_get_contents($stdoutFile) : '';
+        $stderr   = is_file($stderrFile) ? (string) file_get_contents($stderrFile) : '';
         $contents = is_file($events) ? (string) file_get_contents($events) : '';
+
+        if ($timedOut) {
+            self::fail('The run never finished. stdout: ' . $stdout . ' stderr: ' . $stderr);
+        }
 
         if ($contents === '') {
             self::fail('No event stream was written. stdout: ' . $stdout . ' stderr: ' . $stderr);
@@ -176,6 +212,21 @@ final class WorkerBatchingTest extends TestCase
      */
     private function ranIds(array $events): array
     {
+        $ids = $this->sequence($events);
+        sort($ids);
+
+        return $ids;
+    }
+
+    /**
+     * The finish ids in the order the stream carried them.
+     *
+     * @param list<string> $events
+     *
+     * @return list<string>
+     */
+    private function sequence(array $events): array
+    {
         $ids = [];
 
         foreach ($events as $line) {
@@ -186,14 +237,123 @@ final class WorkerBatchingTest extends TestCase
             }
         }
 
-        sort($ids);
-
         return $ids;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function bootFiles(): array
+    {
+        $files = glob($this->project . '/boot-*');
+
+        return $files === false ? [] : $files;
     }
 
     private function boots(): int
     {
-        return substr_count((string) file_get_contents($this->project . '/counters.log'), 'boot');
+        return count($this->bootFiles());
+    }
+
+    public function testTwoSuitesListingOneFileKeepBothOccurrences(): void
+    {
+        file_put_contents($this->project . '/tests/SharedTest.php', <<<'PHP'
+            <?php
+
+            declare(strict_types=1);
+
+            use LucianoPereira\Crucible\Framework\TestCase;
+
+            final class SharedTest extends TestCase
+            {
+                public function testShared(): void
+                {
+                    self::assertTrue(true);
+                }
+            }
+            PHP);
+
+        // The same file in two named suites: the parent plans two
+        // occurrences. The worker discovers a file once, so putting both
+        // units in one batch left one occurrence with no result and the
+        // run exited 2.
+        file_put_contents($this->project . '/crucible.php', <<<'PHP'
+            <?php
+
+            declare(strict_types=1);
+
+            use LucianoPereira\Crucible\Configuration\Crucible;
+
+            return Crucible::configure()
+                ->bootstrap('bootstrap.php')
+                ->testSuite('first', [], files: ['tests/SharedTest.php'])
+                ->testSuite('second', [], files: ['tests/SharedTest.php'])
+                ->build();
+            PHP);
+
+        [$exit, , $events] = $this->crucible([]);
+
+        self::assertSame(0, $exit);
+        self::assertCount(2, $this->ranIds($events), 'One file in two suites is two occurrences.');
+
+        [$exit, $stdout, $events] = $this->crucible(['--parallel', '2', '--worker-batch', '2']);
+
+        self::assertSame(0, $exit, $stdout);
+        self::assertCount(2, $this->ranIds($events), 'Both occurrences ran, with a verdict each.');
+        self::assertSame(3, $this->boots(), 'Two units of one file stay in two processes, as without batching.');
+
+        $outcomes = [];
+
+        foreach ($events as $line) {
+            $decoded = json_decode($line, true);
+
+            if (is_array($decoded) && ($decoded['event'] ?? null) === 'test:finish' && is_string($decoded['id'] ?? null)) {
+                $outcomes[] = $decoded['outcome'] ?? '?';
+            }
+        }
+
+        self::assertSame(['pass', 'pass'], $outcomes);
+    }
+
+    public function testRepeatedTestsKeepTheirOccurrencesInABatch(): void
+    {
+        // Repetition lives INSIDE one unit (the parent duplicates the
+        // test in its group), and the worker rebuilds the unit from its
+        // exact id sequence. Losing the duplicates would leave the
+        // second occurrence unaccounted for.
+        [$exit, $stdout, $events] = $this->crucible(['--parallel', '2', '--worker-batch', '2', '--repeat', '2']);
+
+        self::assertSame(0, $exit, $stdout);
+
+        $ids = $this->ranIds($events);
+        self::assertCount(16, $ids, 'Eight rows repeated twice are sixteen occurrences.');
+
+        $counts = array_count_values($ids);
+
+        foreach ($counts as $id => $occurrences) {
+            self::assertSame(2, $occurrences, $id . ' must run twice.');
+        }
+
+        self::assertSame(3, $this->boots());
+    }
+
+    public function testABatchRunsTestsInTheParentOrder(): void
+    {
+        // One batch, so the single worker decides the visible sequence.
+        // The parent already applied --order-by reverse; the worker used
+        // to apply it again, giving A, B, C, D where the sequential twin
+        // gave D, C, B, A.
+        [$exit, , $sequential] = $this->crucible(['--order-by', 'reverse']);
+
+        self::assertSame(0, $exit);
+        $expected = $this->sequence($sequential);
+        self::assertCount(8, $expected);
+
+        [$exit, $stdout, $events] = $this->crucible(['--parallel', '2', '--worker-batch', '4', '--order-by', 'reverse']);
+
+        self::assertSame(0, $exit, $stdout);
+        self::assertSame($expected, $this->sequence($events), 'The batch must keep the order the parent decided.');
+        self::assertSame(2, $this->boots(), 'Four files in one batch are one worker.');
     }
 
     public function testABatchDividesStartupsAndKeepsThePlanExact(): void

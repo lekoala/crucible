@@ -1830,24 +1830,26 @@ final class RunTestsCommand
             return 2;
         }
 
-        // Ordering reads the cache; persistence stays with the
-        // supervisor, which sees every result on the merged stream.
-        // What a worker orders is its own unit: with the default (and
-        // every non-history) ordering the file would answer questions
-        // this process never asks, so only the two that read it — and
-        // only when recording is on — pay for the read and the decode.
-        $cacheFile = $workingDirectory->absolute($configuration->cacheDirectory) . '/results.json';
-        $cache     = $configuration->cacheResult && $manifest->order->needsHistory()
-            ? ResultCache::load($cacheFile)
-            : new ResultCache();
+        // A named unit carries the parent's decision: the file order,
+        // the test order, the repetitions and the selection are all in
+        // the manifest, so re-applying an ordering here would apply it
+        // twice (reverse was reversed back) and reshuffle what the
+        // parent settled. Only a whole-file unit leaves scheduling to
+        // the worker, and only that path can read the history.
+        if ($manifest->needsScheduling()) {
+            $cacheFile = $workingDirectory->absolute($configuration->cacheDirectory) . '/results.json';
+            $cache     = $configuration->cacheResult && $manifest->order->needsHistory()
+                ? ResultCache::load($cacheFile)
+                : new ResultCache();
 
-        $groups = Repetition::apply($groups, $manifest->overrides->repeat);
-        $groups = (new Scheduler(
-            $manifest->order,
-            $manifest->seed,
-            $cache,
-            $manifest->overrides->resolveDependencies ?? true,
-        ))->schedule($groups);
+            $groups = Repetition::apply($groups, $manifest->overrides->repeat);
+            $groups = (new Scheduler(
+                $manifest->order,
+                $manifest->seed,
+                $cache,
+                $manifest->overrides->resolveDependencies ?? true,
+            ))->schedule($groups);
+        }
 
         $runnerOptions = RunnerOptions::fromConfiguration(
             $configuration,
