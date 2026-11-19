@@ -23,7 +23,7 @@ final class Version
      * tag carries it, so a banner, a report or a cache manifest names
      * the exact build a project runs — never the base it was cut from.
      */
-    public const string NUMBER = '1.3.1.1';
+    public const string NUMBER = '1.3.1.2';
     public const string AUTHOR = 'Luciano Federico Pereira';
 
     /** The project's own home, for the places branding says more than a byline. */
