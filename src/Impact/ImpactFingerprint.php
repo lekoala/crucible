@@ -20,6 +20,7 @@ use SplFileInfo;
 
 use function array_keys;
 use function basename;
+use function dirname;
 use function explode;
 use function hash;
 use function hash_file;
@@ -116,6 +117,15 @@ final readonly class ImpactFingerprint
 
         $suite = [];
 
+        // The walk is a property of the DIRECTORY, not of the test: a
+        // data provider with a thousand rows names one file a thousand
+        // times, and each of those rows used to walk the tree and glob
+        // `Datasets/` again for the same answer. Deduplicating inside
+        // this call keeps the check per run (a `Pest.php` appearing
+        // between two runs still moves the key), because `$walked`
+        // does not outlive `of()`.
+        $walked = [];
+
         foreach ($groups as $group) {
             foreach ($group->tests as $test) {
                 $file = $test->id->file;
@@ -123,11 +133,19 @@ final readonly class ImpactFingerprint
                 // Production ids are project-relative; joining them
                 // against the root is what makes the walk below see
                 // the same directories the edge rules see.
-                $file = WorkingDirectory::isAbsolute($file)
-                    ? $file
-                    : $root . '/' . $file;
+                $file = WorkingDirectory::native(
+                    WorkingDirectory::isAbsolute($file) ? $file : $root . '/' . $file,
+                );
 
-                foreach (SuiteConfiguration::above($root, WorkingDirectory::native($file)) as $configuration) {
+                $directory = dirname($file);
+
+                if (isset($walked[$directory])) {
+                    continue;
+                }
+
+                $walked[$directory] = true;
+
+                foreach (SuiteConfiguration::above($root, $file) as $configuration) {
                     $suite[$configuration] = true;
                 }
             }

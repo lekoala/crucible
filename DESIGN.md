@@ -7370,3 +7370,21 @@ later cannot read history on one side and not the other without a failing pin. P
 failures stay loaded unconditionally on the worker side: a recorded counterexample is replayed
 during the test itself, under any ordering.
 
+### D-181: the suite walk is a per-directory answer, not a per-case one
+
+The fingerprint's suite component walks from each file's directory up to the root, looking
+for `Pest.php` and `Datasets/*.php` at every level. That walk depends on the DIRECTORY, yet
+it ran once per test case, so a data provider with 3,000 rows in 300 files walked and
+globbed the tree 3,000 times for 300 distinct answers. Upstream's fingerprint already
+deduplicated by directory; the rewrite D-175 needed (relative ids resolved against the
+root) folded the walk into the per-case loop and lost it. Restoring the dedupe inside
+`of()` is the whole change: measured on a scratch tree with a `Pest.php` above 300 files
+and a `Datasets/` beside them, the call drops from 350 ms to 2.4 ms (median of seven,
+Windows), and **the key is byte-identical before and after** (`432d0a8d5989f92a…`), so no
+index is orphaned and a warm cache stays warm.
+
+The dedupe lives for the length of one call and no longer, deliberately: a `Pest.php`
+added between two runs still has to move the key, which is what the regression test pins
+on a many-row group.
+
+
