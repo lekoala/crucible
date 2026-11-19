@@ -392,6 +392,7 @@ final class Application
               --log-teamcity <file>     Write TeamCity service messages to <file>, leaving the progress output alone
               --order-by <order>        Run tests in order: default|defects|duration|random|reverse|size
               --parallel <N>            Run test classes in N worker processes (LPT-scheduled)
+              --worker-batch <N>        Let one worker process carry up to N units (opt-in experiment)
               --process-isolation       Run every test in its own process, as if each were marked RunInSeparateProcess
               --profile                 List the slowest tests, with each one's share of total runtime
               --random-order-seed <N>   Seed for --order-by random, to replay an ordering

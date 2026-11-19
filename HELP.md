@@ -127,6 +127,7 @@ precedence puzzle. A listing exits `0`.
 | Option | What it does |
 |---|---|
 | `--parallel <N>` | Run test classes in N worker processes, longest-first scheduled |
+| `--worker-batch <N>` | Let one worker process carry up to N independent units — opt-in experiment; one startup, one bootstrap, one discovery per batch |
 | `--shard <M/N>` | Run the Mth of N hash-stable slices — adding tests never moves others between shards |
 | `--order-by <order>` | `default`, `defects`, `duration`, `random`, `reverse`, `size` |
 | `--random-order-seed <N>` | Seed for `--order-by random`, so an ordering can be replayed |

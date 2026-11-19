@@ -57,6 +57,18 @@ final class CliOptionsTest extends TestCase
         $this->assertSame(4, $equals->parallel);
     }
 
+    public function testWorkerBatchTakesAUnitCountOrNothing(): void
+    {
+        $this->assertNull($this->parse([])->workerBatch);
+        $this->assertSame(8, $this->parse(['--worker-batch', '8'])->workerBatch);
+        $this->assertSame(8, $this->parse(['--worker-batch=8'])->workerBatch);
+
+        // Opt-in means one unit per process unless asked otherwise;
+        // "zero units per process" is not a size, it is a typo.
+        $this->assertIsString(CliOptions::fromArgv(['crucible', '--worker-batch', '0']));
+        $this->assertIsString(CliOptions::fromArgv(['crucible', '--worker-batch', 'lots']));
+    }
+
     public function testViewIsAValuedOptionSelectingAProgressViewKey(): void
     {
         $this->assertNull($this->parse([])->view);

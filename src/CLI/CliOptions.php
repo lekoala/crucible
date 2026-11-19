@@ -82,7 +82,7 @@ final readonly class CliOptions
 
     private const array VALUED = [
         '--configuration', '--log-events-json', '--log-junit', '--log-markdown', '--log-pdf',
-        '--order-by', '--random-order-seed', '--parallel', '--filter', '--cache-directory',
+        '--order-by', '--random-order-seed', '--parallel', '--worker-batch', '--filter', '--cache-directory',
         '--shard', '--retries', '--retry', '--repeat', '--default-time-limit', '--rounds', '--coverage-clover',
         '--coverage-html', '--coverage-cobertura',
         '--testdox-text', '--testdox-html', '--testdox-summary',
@@ -239,6 +239,7 @@ final readonly class CliOptions
         public ?string $orderBy = null,
         public ?int $randomOrderSeed = null,
         public ?int $parallel = null,
+        public ?int $workerBatch = null,
         public ?string $filter = null,
         public ?string $shard = null,
         public ?string $cacheDirectory = null,
@@ -612,10 +613,14 @@ final readonly class CliOptions
                 : sprintf('Unrecognized argument "%s".', $argument);
         }
 
-        foreach (['--random-order-seed', '--parallel', '--retries', '--retry', '--rounds', '--diff-context'] as $numeric) {
+        foreach (['--random-order-seed', '--parallel', '--worker-batch', '--retries', '--retry', '--rounds', '--diff-context'] as $numeric) {
             if (isset($values[$numeric]) && !ctype_digit($values[$numeric])) {
                 return sprintf('Option %s expects a non-negative integer, got "%s".', $numeric, $values[$numeric]);
             }
+        }
+
+        if (isset($values['--worker-batch']) && (int) $values['--worker-batch'] < 1) {
+            return sprintf('Option --worker-batch expects at least 1 unit per process, got "%s".', $values['--worker-batch']);
         }
 
         // A percentage, not an integer: --min=99.5 is a real ask, and the
@@ -793,6 +798,7 @@ final readonly class CliOptions
             orderBy: $values['--order-by'] ?? null,
             randomOrderSeed: isset($values['--random-order-seed']) ? (int) $values['--random-order-seed'] : null,
             parallel: isset($values['--parallel']) ? (int) $values['--parallel'] : null,
+            workerBatch: isset($values['--worker-batch']) ? (int) $values['--worker-batch'] : null,
             filter: $values['--filter'] ?? null,
             shard: $values['--shard'] ?? null,
             cacheDirectory: $values['--cache-directory'] ?? null,

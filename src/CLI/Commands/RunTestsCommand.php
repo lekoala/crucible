@@ -1243,6 +1243,7 @@ final class RunTestsCommand
                 order: $order,
                 seed: $seed,
                 parallel: $parallel,
+                workerBatch: max(1, $options->workerBatch ?? 1),
                 retries: $options->retries,
                 coverageDirectory: $coverageDirectory,
                 updateSnapshots: $options->updateSnapshots,

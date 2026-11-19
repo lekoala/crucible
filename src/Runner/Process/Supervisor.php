@@ -73,10 +73,13 @@ use const STDERR;
  *
  * Workers are consumed from a queue in LPT order (Graham 1969):
  * costliest unit first, next unit to the first free slot — cached
- * durations make the estimate. A worker that reaches EOF without its
- * run:finish handshake crashed: every expected-but-unfinished test is
- * reported as errored, with the worker's stderr tail as the reason.
- * The crash is contained; the run continues.
+ * durations make the estimate. With `--worker-batch N` several
+ * independent units share one worker process (D-183): one startup,
+ * one bootstrap, one discovery for the whole batch, and the crash
+ * containment and accounting unchanged. A worker that reaches EOF
+ * without its run:finish handshake crashed: every expected-but-unfinished
+ * test is reported as errored, with the worker's stderr tail as the
+ * reason. The crash is contained; the run continues.
  */
 final class Supervisor
 {
@@ -115,6 +118,7 @@ final class Supervisor
      * @param ?list<non-empty-string> $onlySuites
      * @param list<non-empty-string>  $exceptSuites
      * @param list<non-empty-string>  $suffixes
+     * @param int<1, max>             $workerBatch   units per worker process (--worker-batch); 1 keeps one unit per process
      */
     public function __construct(
         private readonly Emitter $emitter,
@@ -147,6 +151,7 @@ final class Supervisor
         private readonly ?array $onlySuites = null,
         private readonly array $exceptSuites = [],
         private readonly array $suffixes = [],
+        private readonly int $workerBatch = 1,
     ) {}
 
     /**
@@ -424,7 +429,92 @@ final class Supervisor
             }
         }
 
-        return new PlannedUnit(new WorkUnit($file, $ids, $cost), $expected, $dependsOn, [], $preserve, $isolated);
+        return new PlannedUnit([new WorkUnit($file, $ids, $cost)], $expected, $dependsOn, [], $preserve, $isolated);
+    }
+
+    /**
+     * Groups scheduled units into one process each when the operator
+     * asked for it (D-183). Batches are built from CONSECUTIVE units in
+     * the scheduled order, so a batch sees the files in the order the
+     * sequential run would, and the batch inherits its members' summed
+     * cost for LPT.
+     *
+     * Excluded, each for its own reason: a unit that asked for its own
+     * process (its isolation is the point, and --process-isolation
+     * marks every test), a unit that provides or consumes a #[Depends]
+     * value (the value is captured at dispatch, so a provider and its
+     * consumer each need the process boundary), and a unit that asked
+     * for the parent's global state (one snapshot at dispatch would be
+     * handed to every member of the batch). A stop-on option also keeps
+     * one unit per process: a halted worker must not take the rest of
+     * its batch with it.
+     *
+     * @param list<PlannedUnit> $units
+     *
+     * @return list<PlannedUnit>
+     */
+    private function batched(array $units): array
+    {
+        if ($this->workerBatch <= 1 || $this->stopOnConfigured) {
+            return $units;
+        }
+
+        $batches = [];
+        $current = [];
+
+        foreach ($units as $unit) {
+            if (!$this->batchable($unit)) {
+                if ($current !== []) {
+                    $batches[] = $this->batch($current);
+                    $current   = [];
+                }
+
+                $batches[] = $unit;
+
+                continue;
+            }
+
+            $current[] = $unit;
+
+            if (count($current) === $this->workerBatch) {
+                $batches[] = $this->batch($current);
+                $current   = [];
+            }
+        }
+
+        if ($current !== []) {
+            $batches[] = $this->batch($current);
+        }
+
+        return $batches;
+    }
+
+    private function batchable(PlannedUnit $unit): bool
+    {
+        return !$unit->isolated
+            && $unit->dependsOn === []
+            && $unit->provides === []
+            && !$unit->preserveGlobalState;
+    }
+
+    /**
+     * @param non-empty-list<PlannedUnit> $units
+     */
+    private function batch(array $units): PlannedUnit
+    {
+        if (count($units) === 1) {
+            return $units[0];
+        }
+
+        $work     = [];
+        $expected = [];
+
+        foreach ($units as $unit) {
+            $work     = [...$work, ...$unit->units];
+            $expected = [...$expected, ...$unit->expected];
+        }
+
+        return new PlannedUnit($work, $expected);
     }
 
     /**
@@ -432,9 +522,11 @@ final class Supervisor
      */
     private function runUnits(array $units): void
     {
+        $units = $this->batched($units);
+
         // LPT: costliest unit first, next unit to the first free slot.
         // The sort is stable, so unknown costs keep scheduled order.
-        usort($units, static fn(PlannedUnit $a, PlannedUnit $b): int => $b->unit->estimatedCost <=> $a->unit->estimatedCost);
+        usort($units, static fn(PlannedUnit $a, PlannedUnit $b): int => $b->cost() <=> $a->cost());
 
         /** @var array<int, WorkerProcess> $active */
         $active = [];
@@ -537,7 +629,7 @@ final class Supervisor
                     $this->workingDirectory,
                     new WorkerManifest(
                         $this->configurationPath,
-                        [$planned->unit],
+                        $planned->units,
                         $this->order,
                         $this->seed,
                         $this->parallel > 1 ? $slot : null,
