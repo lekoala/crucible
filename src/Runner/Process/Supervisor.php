@@ -603,12 +603,10 @@ final class Supervisor
             $this->await($active);
 
             foreach ($active as $key => $worker) {
-                // stdout carries only user output (CB-23): discarding it
-                // keeps the pipe from filling, and its readiness is what
-                // wakes the loop. Events travel on stderr, behind the
-                // marker nextLine() splits on.
-                $worker->drainStdout();
-
+                // stdout is the null device (WorkerProcess): there is no
+                // pipe to drain and nothing the worker writes there can
+                // fill one. Events travel on stderr, behind the marker
+                // nextLine() splits on.
                 while (($line = $worker->nextLine()) !== null) {
                     if ($this->parser->isRunFinished($line)) {
                         $worker->markFinished();
@@ -863,7 +861,6 @@ final class Supervisor
         $read = [];
 
         foreach ($active as $worker) {
-            $read[] = $worker->stdout();
             $read[] = $worker->stderr();
         }
 
