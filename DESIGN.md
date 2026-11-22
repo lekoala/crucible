@@ -7477,6 +7477,41 @@ lost result (`error`) and the run could not be complete. ✓ New
 user stderr without a newline before a frame, partial frame at exit. `php crucible --filter Worker`:
 21 passed, 1 skipped (no Laravel), 1 untested (no `posix`).
 
+### D-190: a worker's stdout is the null device, and its stderr is a file on Windows
+
+A worker's stdout was a pipe nobody forwarded: the supervisor drained it only to keep it from
+filling, and on Windows that drain deadlocked the run. `stream_set_blocking()` returns **false** for
+a `proc_open()` pipe (measured on PHP 8.3.6), so the pipe stayed blocking; a bare `fread()` on the
+stdout of a worker that writes nothing there waited while the worker — a handful of tests in —
+filled its stderr pipe and waited for a drain that could not happen. A fixture of three ordinary
+files with 30 trivial tests each and `--parallel 2` never finished; it now takes 0.18 s.
+
+Gating the stderr read on `stream_select()` was not enough. On Windows that call reports a silent
+pipe as readable, so a worker that emits `test:start` and then works for 850 ms still held the
+reader until its next frame: a second worker's result, already written, reached the stream only
+after the silent one woke. That is the shape that also made the mutation executor check its timeout
+late — after the read it wanted to bound. Three things changed:
+
+- the child's stdout is the platform's null device (`NullDevice`, already used wherever a
+  descriptor must be opened and discarded). Worker stdout was discarded by policy already, so
+  discarding it at the descriptor is the same behaviour with no pipe to fill;
+- on Windows the stderr CHANNEL is a regular file, created by `proc_open()` and read incrementally
+  by offset (seeking clears the stream's EOF flag, so a file that grew since the last read is
+  seen). A file read never waits: the child appends, the supervisor reads what has arrived and
+  sleeps 5 ms when nothing has. POSIX keeps the pipe and `stream_select()`, which work there;
+- the supervisor's wait is per platform for the same reason: `stream_select()` on the file would
+  report it readable forever and spin.
+
+`WorkerSilentWorkerTest` is the decisive regression: two files under `--parallel 2`, the first
+emits its start and sleeps 850 ms, the second finishes immediately. The test asserts the SEQUENCE
+of finish events — the fast worker first — and on the select-gated transport it failed with the
+fast result at position 1 and the silent one at 0. `WorkerStdoutDrainTest` now writes the child's
+output to files and polls `proc_get_status()` until its deadline, because its own blocking read
+could not enforce the deadline it was supposed to enforce.
+
+This sits on top of D-188, which moves the event stream to stderr: without it, the stream this
+change discards is the one carrying the events.
+
 ---
 
 ## Closing the planned record
