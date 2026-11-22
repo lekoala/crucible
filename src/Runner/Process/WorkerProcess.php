@@ -106,17 +106,6 @@ final class WorkerProcess
 
     private ?int $signal = null;
 
-    /**
-     * Where the child's stderr goes on Windows, and how far this reader
-     * has consumed it. Named pipes are the cleaner transport, but PHP
-     * cannot make a proc_open() pipe non-blocking there
-     * (stream_set_blocking() answers false on 8.3.6) and stream_select()
-     * reports a silent pipe as readable, so a read still waits for the
-     * child. A regular file is seekable and never blocks: the child
-     * writes, the supervisor reads what has arrived.
-     */
-    private ?string $stderrPath = null;
-
     private int $stderrOffset = 0;
 
     /**
@@ -125,14 +114,7 @@ final class WorkerProcess
      * @param ?string      $stderrPath  the file named by the child, Windows only
      * @param list<TestId> $expected the test ids this worker must finish
      */
-    private function __construct(
-        private $process,
-        private $stderr,
-        ?string $stderrPath,
-        public readonly array $expected,
-    ) {
-        $this->stderrPath = $stderrPath;
-    }
+    private function __construct(private $process, private $stderr, private readonly ?string $stderrPath, public readonly array $expected) {}
 
     /**
      * @param non-empty-string        $crucibleBinary path of the crucible entry script
